@@ -1,0 +1,202 @@
+# This should be placed in the Snakefile.
+##-----------------------------------------------##
+## Working directory                             ##
+## Adapt to your needs                           ##
+##-----------------------------------------------##
+
+BASE_DIR = "/30days/uqakaraw/93.QUasi_test2/Non_asthmatic_day_4"
+WDIR = BASE_DIR + "/fastq"
+#virus_reference = BASE_DIR + "/reference/pH1N1"
+#reference_fasta = BASE_DIR + "/reference/pH1N1"
+
+virus_reference = "/30days/uqakaraw/92.Quasispecies_pipeline/reference/A_HA_H1.fa"
+reference_fasta = "/30days/uqakaraw/92.Quasispecies_pipeline/reference/A_HA_H1.fa"
+
+
+## Variables declaration
+## Declaring some variables used by topHat and other tools...
+## (GTF file, INDEX, chromosome length)
+##--------------------------------------------------------------------------------------##
+# Adapt the path to your needs
+
+SAMPLES, = glob_wildcards( WDIR + "/{smp}_1.fastq")
+NB_SAMPLES = len(SAMPLES)
+
+#NA = "NA.fa"
+#PA = "PA.fa"
+#PB1 = "PB1.fa"
+#PB2 = "PB2.fa"
+#HA = "HA.fa"
+#NP = "NP.fa"
+#MAXTRIX = "MATRIX.fa"
+#NS = "NS.fa"
+
+#qure = expand("results/reads_fq{smp}/{smp}QuRE_reconstruction.done",smp=SAMPLES),
+rule all:
+        input:
+         #quasirecomb = expand("/30days/uqakaraw/93.QUasi_test2/Non_asthmatic_day_4/results/{smp}_quasirecomb",smp=SAMPLES),
+         cliquesnv =  expand("results/cliquesnv{smp}",smp=SAMPLES),
+         bcf = expand("results/bcftools{smp}/{smp}.filtered_frq.vcf",smp=SAMPLES)
+rule fastqc:
+        input:
+         fwd = WDIR + "/{smp}_1.fastq",
+         rev = WDIR + "/{smp}_2.fastq"
+        output:
+         fwd = "fastqc/{smp}/{smp}_1_fastqc.zip",
+         rev = "fastqc/{smp}/{smp}_2_fastqc.zip"
+        conda: "env/quasi.yaml"
+        message: """--- Quality check of raw data with Fastqc."""
+        shell:
+         "mkdir -p fastqc && fastqc --outdir fastqc/{wildcards.smp} --extract -f fastq {input.fwd} {input.rev}"
+
+rule bbduck:
+        input:
+         fwd = WDIR + "/{smp}_1.fastq",
+         rev = WDIR + "/{smp}_2.fastq",
+         #check01 = rules.fastqc.output.fwd,
+         ref = "/30days/uqakaraw/92.Quasispecies_pipeline/conda/opt/bbmap-38.79-0/resources/adapters.fa"
+        output:
+         fwd = "results/bbduck/{smp}_1.fq",
+         rev = "results/bbduck/{smp}_2.fq"
+        conda: "env/quasi.yaml"
+        shell:
+         "bbduk.sh in1={input.fwd} out1={output.fwd} in2={input.rev} out2={output.rev} ref={input.ref} ktrim=r k=23 mink=11 hdist=1 tpe tbo qtrim=rl trimq=20 minlen=50 maq=20"
+
+# in1 and in2 are used to indicate the full path to trim both files. BOTH files must be processed in the same command-line to correctly process each read with its pair
+# ktrim=r. Use to trim the adapters; kmers will only come from the right end of the read (3' adapters).
+# k=23. “k” specifies the maximum kmer size to use.
+# mink=8. Bbduk will additionally look for shorter kmers with lengths 22 to 8 (in this case).
+# hdist=1. Controls the hamming distance for all kmers (this allows one mismatch).
+# tpe. Use this flag to trim both reads to the same length (in the event that an adapter kmer was only detected in one of them).
+# tbo. Use this flag to also trim adapters based on pair overlap detection using BBMerge.
+# qtrim=rl. This command will trim both sides of the reads (left and rigth). It happens AFTER all kmer-based operations. REVISAR!!!
+# trimq=30. This will quality-trim to Q30 using the Phred algorithm.
+# minlen=50. This will discard reads shorter than 50bp after trimming.
+# maq=30. This will discard reads with average quality below 30.
+
+#----Bowtie----
+#bowtie2-build $virus.fasta $name_ref
+
+# this step builds the index from the reference file
+
+rule bowtie2_build:
+        input:
+         fwd = rules.bbduck.output.fwd,
+         rev = rules.bbduck.output.rev
+         #ref = reference_fasta
+        output:
+         sam = "results/bowtie2/{smp}.sam"
+        params:
+         p = "4",
+         x = virus_reference,
+        conda: "env/quasi.yaml"
+        shell:
+         #"bowtie2-build {input.ref} {input.ref} && " "
+         "bowtie2 -p {params.p} --no-mixed --no-discordant -x {params.x} -1 {input.fwd} -2 {input.rev} -S {output.sam}"
+
+# This step will produce the actual alignment
+# -p 4. The -p option causes Bowtie 2 to launch a specified number of parallel search threads (for computer with multiple processors/cores).
+# --no-mixed. By default, when bowtie2 cannot find a concordant or discordant alignment for a pair, it then tries to find alignments for the individual mates.
+# This option disables that behavior.
+# --no-discordant. This option disables the search for discordant alignments if it cannot find any concordant alignments.
+# A discordant alignment is an alignment where both mates align uniquely, but that does not satisfy the paired-end constraints.
+# -x. Indicates the base name of the index for the reference genome.
+# -1 and -2 are used to indicate the fastq files with the reads to align.
+# -S outputs file name.
+
+rule samtools:
+        input:
+         sam = rules.bowtie2_build.output.sam,
+         ref = reference_fasta
+        conda: "env/quasi.yaml"
+        output:
+         fwd = touch("results/samtools{smp}/{smp}_f1.fq.done"),
+         rev = touch("results/samtools{smp}/{smp}_f2.fq.done"),
+         bam = "results/samtools{smp}/{smp}.bam"
+        shell:
+         " samtools view -bST {input.ref} {input.sam} > {output.bam}"
+
+rule samtools1:
+        input:
+         fwd = rules.samtools.output.fwd,
+         rev = rules.samtools.output.rev,
+         bam = rules.samtools.output.bam
+        conda: "env/quasi.yaml"
+        output:
+         fwd = touch("results/samtools{smp}/{smp}_f1.fq1.done"),
+         rev = touch("results/samtools{smp}/{smp}_f2.fq1.done"),
+         bam = "results/samtools{smp}/{smp}_1.sorted.bam"
+        shell:
+         " samtools sort {input.bam} > {output.bam}"
+
+rule samtools2:
+        input:
+         bam = rules.samtools1.output.bam
+        conda: "env/quasi.yaml"
+        output:
+         bam = "/30days/uqakaraw/93.QUasi_test2/Non_asthmatic_day_4/results/samtools{smp}/{smp}.map.bam"
+        shell:
+         " samtools view -h -F 4 -b  {input.bam} > {output.bam} "
+
+rule samtools3:
+        input:
+         bam = rules.samtools2.output.bam
+        conda: "env/quasi.yaml"
+        output:
+         bam = "results/samtools{smp}/{smp}.map.bam.bai"
+        shell:
+         " samtools index {input.bam} {output.bam}"
+
+rule samtools4:
+        input:
+         map_bam = rules.samtools2.output.bam,
+         bai = rules.samtools3.output.bam
+        conda: "env/quasi.yaml"
+        output:
+         txt = "results/samtools{smp}/{smp}.coverag.txt"
+        shell:
+         " samtools depth -d10000000 {input.map_bam} > {output.txt}"
+
+
+# This step exports the alignment from SAM format to the BAM format.
+# -b. Forces output in the BAM format.
+# -S. Ignored for compatibility with previous samtools versions.
+# -T. Indicates the FASTA format for the reference file
+# Sorts the alignment by leftmost coordinates
+# This step discards all reads that do not map to the reference
+# -h. Includes the header in the output.
+# -F. Filters aligment by a specific flag (include only mapped reads)
+# -b. Forces output in the BAM format.
+# This step generates the index file (.bai) of the alignment.
+
+rule cliquesnv:
+        input:
+         #q = rules.samtools2.output,
+         bam = rules.samtools2.output.bam
+        output:
+         cliquesnv = directory("results/cliquesnv{smp}")
+        conda: "env/quasi.yaml"
+        shell:
+         "java -Xmx72G -Xms10G -XX:+UseParallelGC -XX:+UseNUMA -XX:NewRatio=9 -jar /30days/uqakaraw/92.Quasispecies_pipeline/clique-snv.jar -threads 20 -m snv-illumina -tf 0.01 -in {input.bam} -fdf extended2 -log "
+         "-outDir {output.cliquesnv} "
+
+# Sorts the alignment by read name.
+#-q. Force fastq output.
+#-P. Paired-end data.
+#-N. Append /1 and /2 suffixes.
+#-M. Output only mapped reads.
+#Concatenate read files
+# This step forces fasta format (discards Quality info)
+
+# Runs Qure software to reconstruct haplotypes
+# -cp. Indicates full path to the qure class.
+# -Xmx. Controls the maximum amount of memory (RAM) my Java program uses. Default is too low for our dataset.
+# homopolymericErrorRate nonHomopolymericErrorRate iterations.  If the last three parameters are not inserted, default values are used (0.01, 0.005, 3000).
+
+# Runs CliqueSNV software to reconstruct haplotypes
+# # -Xmx. Controls the maximum amount of memory (RAM) my Java program uses. Default is too low for our dataset.
+# # -jar. Indicates full path to the CliqueSNV jar file.
+# # -m snv-illumina. Sets specific mode for illumina data.
+# # -t. Minimum threshold for O22 value. Default is 10 (only for Illumina reads)
+# # -tf. Minimum haplotype expected frequency.
+# # -in. Indicates alignment file to use.
